@@ -1,4 +1,4 @@
 .vscode/
 target/
 nordigen.cfg
-state.json
+state*.json
