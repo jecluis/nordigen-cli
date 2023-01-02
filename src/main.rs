@@ -1,5 +1,3 @@
-use std::io::ErrorKind;
-
 // nordigen-cli: A simple Nordigen client
 // Copyright (C) 2022  Joao Eduardo Luis <joao@abysmo.io>
 //
@@ -9,28 +7,161 @@ use std::io::ErrorKind;
 // (at your option) any later version.
 //
 use clap::Parser;
+use std::io::ErrorKind;
 
 pub mod cli;
-pub mod nordigen;
 
 use cli::{
     AuthorizeCmd, BankAccountBalanceCmd, BankAuthorizeCmd, BankCmds,
     BankListCmd, Cli, Commands, RefreshCmd,
 };
 use cli::{BankAccountCmds, BankAccountTransactionsCmd};
-use nordigen::authorize;
-use nordigen::banks;
+use nordigen::banks::BankAuthState;
 use nordigen::config::NordigenConfig;
+use nordigen::state::NordigenState;
+use nordigen::{authorize, banks};
 use prettytable::{row, Attr, Cell, Row, Table};
 
-use crate::nordigen::state::NordigenState;
+fn read_file(path: &std::path::PathBuf) -> Result<String, String> {
+    if !path.exists() {
+        return Err(format!("file at {} does not exist!", path.display()));
+    }
+
+    let contents = match std::fs::read_to_string(path) {
+        Err(error) => {
+            return Err(format!(
+                "Error reading file at {}: {}",
+                path.display(),
+                error
+            ));
+        }
+        Ok(value) => value,
+    };
+    Ok(contents)
+}
+
+fn parse_state(path: &std::path::PathBuf) -> Result<NordigenState, String> {
+    let contents = match read_file(path) {
+        Err(err) => {
+            return Err(format!("Error reading state file: {}", err));
+        }
+        Ok(val) => val,
+    };
+    let state: NordigenState = match serde_json::from_str(&contents) {
+        Err(error) => {
+            return Err(format!(
+                "Unable to parse state file at {}: {}",
+                path.display(),
+                error
+            ))
+        }
+        Ok(value) => value,
+    };
+
+    Ok(state)
+}
+
+fn write_state(
+    path: &std::path::PathBuf,
+    token: String,
+    refresh: String,
+    token_ttl: u32,
+    refresh_ttl: u32,
+) -> Result<NordigenState, String> {
+    let state: NordigenState =
+        NordigenState::new(token, token_ttl, refresh, refresh_ttl);
+
+    let buffer = match std::fs::File::create(path) {
+        Err(err) => {
+            return Err(format!(
+                "Unable to open state file for writing: {}",
+                err
+            ));
+        }
+        Ok(res) => res,
+    };
+
+    match serde_json::to_writer_pretty(buffer, &state) {
+        Err(err) => {
+            return Err(format!("Unable to write state to disk: {}", err));
+        }
+        Ok(_) => {}
+    };
+
+    Ok(state)
+}
+
+fn parse_config(path: &std::path::PathBuf) -> Result<NordigenConfig, String> {
+    let contents = match read_file(path) {
+        Err(err) => {
+            return Err(format!("Error reading config file: {}", err));
+        }
+        Ok(val) => val,
+    };
+    let config: NordigenConfig = match toml::from_str(&contents) {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            return Err(format!(
+                "Unable to parse config file at path {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    };
+
+    Ok(config)
+}
+
+fn parse_bank(path: &std::path::PathBuf) -> Result<BankAuthState, String> {
+    let contents = match read_file(path) {
+        Err(err) => {
+            return Err(format!("Error reading bank file: {}", err));
+        }
+        Ok(val) => val,
+    };
+
+    let state: BankAuthState = match serde_json::from_str(&contents) {
+        Err(err) => {
+            return Err(format!(
+                "Unable to parse bank state file at {}: {}",
+                path.display(),
+                err
+            ));
+        }
+        Ok(value) => value,
+    };
+    Ok(state)
+}
+
+fn write_bank<'a>(
+    auth: &'a BankAuthState,
+    path: &std::path::PathBuf,
+) -> Result<&'a BankAuthState, String> {
+    let buffer = match std::fs::File::create(path) {
+        Err(err) => {
+            return Err(format!(
+                "Unable to open bank state file for writing: {}",
+                err
+            ));
+        }
+        Ok(res) => res,
+    };
+
+    match serde_json::to_writer_pretty(buffer, auth) {
+        Err(err) => {
+            return Err(format!("Unable to write bank state to disk: {}", err));
+        }
+        Ok(_) => {}
+    };
+    Ok(auth)
+}
 
 fn get_state(path: &std::path::PathBuf) -> Result<NordigenState, ErrorKind> {
     if !path.exists() {
         return Err(ErrorKind::NotFound);
     }
 
-    match NordigenState::parse(&path) {
+    match parse_state(&path) {
         Err(error) => {
             eprintln!("Error obtaining on-disk state: {}", error);
             return Err(ErrorKind::InvalidData);
@@ -70,7 +201,7 @@ async fn do_authorize(cmd: &AuthorizeCmd) {
 
     if cmd.state.exists() {
         println!("Found on-disk state...");
-        let state = NordigenState::parse(&cmd.state).unwrap_or_else(|err| {
+        let state = parse_state(&cmd.state).unwrap_or_else(|err| {
             eprintln!("Error obtaining on-disk state: {}", err);
             std::process::exit(1);
         });
@@ -88,7 +219,7 @@ async fn do_authorize(cmd: &AuthorizeCmd) {
 
     println!("Obtaining new authorization...");
 
-    let config = NordigenConfig::parse(&cmd.config).unwrap_or_else(|err| {
+    let config = parse_config(&cmd.config).unwrap_or_else(|err| {
         println!("Error parsing config: {err}");
         std::process::exit(1);
     });
@@ -99,7 +230,7 @@ async fn do_authorize(cmd: &AuthorizeCmd) {
             std::process::exit(1);
         });
 
-    let state = NordigenState::write(
+    let state = write_state(
         &cmd.state,
         authorization.access,
         authorization.refresh,
@@ -136,7 +267,7 @@ async fn do_refresh(cmd: &RefreshCmd) {
             std::process::exit(1);
         });
 
-    let new_state = NordigenState::write(
+    let new_state = write_state(
         &cmd.state,
         new_token,
         state.refresh_token,
@@ -215,7 +346,7 @@ async fn do_bank_authorization(
     });
 
     let bank_state = banks::BankAuthState::new(&cmd.bank_id, &requisition);
-    bank_state.write(&cmd.auth).unwrap_or_else(|err| {
+    write_bank(&bank_state, &cmd.auth).unwrap_or_else(|err| {
         eprintln!("Error writing bank state: {}", err);
         std::process::exit(1);
     });
@@ -232,15 +363,14 @@ async fn do_bank_account_list(
         std::process::exit(1);
     }
 
-    let bankstate =
-        banks::BankAuthState::parse(bankstatepath).unwrap_or_else(|err| {
-            eprintln!(
-                "Unable to read bank state file at {}: {}",
-                bankstatepath.display(),
-                err
-            );
-            std::process::exit(1);
-        });
+    let bankstate = parse_bank(bankstatepath).unwrap_or_else(|err| {
+        eprintln!(
+            "Unable to read bank state file at {}: {}",
+            bankstatepath.display(),
+            err
+        );
+        std::process::exit(1);
+    });
 
     let acc = banks::Accounts::new(
         &state.token,
@@ -304,15 +434,14 @@ async fn do_bank_account_transactions(
         std::process::exit(1);
     }
 
-    let bankstate =
-        banks::BankAuthState::parse(bankpath).unwrap_or_else(|err| {
-            eprintln!(
-                "Unable to read bank state file at {}: {}",
-                bankpath.display(),
-                err
-            );
-            std::process::exit(1);
-        });
+    let bankstate = parse_bank(bankpath).unwrap_or_else(|err| {
+        eprintln!(
+            "Unable to read bank state file at {}: {}",
+            bankpath.display(),
+            err
+        );
+        std::process::exit(1);
+    });
 
     let acc = banks::Accounts::new(
         &state.token,
@@ -365,15 +494,14 @@ async fn do_bank_account_balance(
         std::process::exit(1);
     }
 
-    let bankstate =
-        banks::BankAuthState::parse(bankpath).unwrap_or_else(|err| {
-            eprintln!(
-                "Unable to read bank state file at {}: {}",
-                bankpath.display(),
-                err
-            );
-            std::process::exit(1);
-        });
+    let bankstate = parse_bank(bankpath).unwrap_or_else(|err| {
+        eprintln!(
+            "Unable to read bank state file at {}: {}",
+            bankpath.display(),
+            err
+        );
+        std::process::exit(1);
+    });
 
     let accnt = banks::Accounts::new(
         &state.token,
@@ -404,10 +532,6 @@ async fn do_bank_account_balance(
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-
-    // if let Some(config) = cli.config.as_ref() {
-    //     show_config(config);
-    // }
 
     match &cli.command {
         Commands::Authorize(cmd) => {

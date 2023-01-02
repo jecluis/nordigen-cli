@@ -708,12 +708,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nordigen"
+version = "0.1.0"
+source = "git+https://github.com/jecluis/ob-nordigen-rs#ff124cde9a8c160a1adb5faf26f8720a38f0df87"
+dependencies = [
+ "chrono",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nordigen-cli"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
  "futures",
+ "nordigen",
  "prettytable-rs",
  "reqwest",
  "serde",
